@@ -1,0 +1,365 @@
+<!-- DailyReport.client.html — клиент ежедневного отчёта.
+     Вставляется в конец Index.html через <?!= HtmlService.createHtmlOutputFromFile('DailyReport.client').getContent(); ?>
+     Ничего в Index.html менять не нужно.
+-->
+<script>
+(function(){
+  // Локальное состояние
+  const DAILY = { data:null, inited:false, selectedChip: {}, cacheToken:null }; // selectedChip[date] = {store,staff} | null
+
+  // Быстрые утилиты (используем те, что уже определены в Index.html: escapeHtml, formatPrice, option, fillSelectFromDict, fillSimpleSelect)
+  function qs(id){ return document.getElementById(id); }
+  function money(n){ const v = Number(n||0); return isNaN(v) ? '0' : v.toLocaleString('ru-RU', {maximumFractionDigits:2}); }
+  function yyyy_mm_dd(dt){ return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`; }
+  function ddmmyyyyToMsLocal(s){ const m=(s||'').match(/^(\d{2})\.(\d{2})\.(\d{4})$/); return m ? new Date(`${m[3]}-${m[2]}-${m[1]}T00:00:00`).getTime() : 0; }
+  function withinDateRange(dateStr, fromISO, toISO){
+    const ms = ddmmyyyyToMsLocal(dateStr);
+    const f = fromISO ? new Date(fromISO + 'T00:00:00').getTime() : null;
+    const t = toISO   ? new Date(toISO   + 'T23:59:59').getTime() : null;
+    if (f && ms < f) return false;
+    if (t && ms > t) return false;
+    return true;
+  }
+  function parseSelectedChip(date){
+    const x = DAILY.selectedChip[date];
+    if (!x || !x.store || !x.staff) return null;
+    return x;
+  }
+  function matchesChip(row, chip){
+    if (!chip) return true;
+    return (row.store === chip.store) && (row.staff === chip.staff);
+  }
+  function sumPaymentsMapFromRows(rows){
+    const sum = {};
+    rows.forEach(r => {
+      const m = r.payments_map || {};
+      Object.keys(m).forEach(k => sum[k] = (sum[k] || 0) + (m[k] || 0));
+    });
+    return sum;
+  }
+  function mapToPairsSorted(m){
+    const arr = Object.keys(m||{}).map(k => [k, Number(m[k]||0)]);
+    arr.sort((a,b) => b[1] - a[1]);
+    return arr;
+  }
+
+  // Рисуем каркас вкладки "Ежедневный отчёт" (заменим placeholder внутри #tab-daily)
+  function mountSkeleton(){
+    const host = document.getElementById('tab-daily');
+    if (!host) return;
+
+    host.innerHTML = `
+      <h2 style="margin:0 0 8px;">Ежедневный отчёт</h2>
+
+      <div class="preorder-head" id="dailyHead">
+        <div class="filter"><label>С даты</label><input type="date" id="dailyFrom"></div>
+        <div class="filter"><label>По дату</label><input type="date" id="dailyTo"></div>
+        <div class="filter"><label>Магазин</label><select id="dailyStore"></select></div>
+        <div class="filter"><label>Сотрудник</label><select id="dailyStaff"></select></div>
+        <div class="filter"><label>Тип товара</label><select id="dailyItemType"></select></div>
+        <div class="preorder-actions"><button id="btnDailyRefresh" class="btn">Обновить</button></div>
+      </div>
+
+      <div id="dailyDays" style="padding:0 16px 16px;"></div>
+    `;
+
+    // Заполним селекты
+    const $store = qs('dailyStore'), $staff = qs('dailyStaff'), $item = qs('dailyItemType');
+    fillSelectFromDict($store, (NALICHIE?.dicts?.stores||[]), 'Все магазины');
+    fillSelectFromDict($staff, (NALICHIE?.dicts?.staff||[]), 'Все сотрудники');
+
+    // item_types из DAILY.data.dicts (подхватим при первой загрузке)
+    $item.innerHTML = ''; $item.append(option('Все типы',''));
+
+    // Даты по умолчанию: последние 30 дней
+    const to = new Date();
+    const from = new Date(to); from.setDate(from.getDate()-29);
+    qs('dailyFrom').value = yyyy_mm_dd(from);
+    qs('dailyTo').value   = yyyy_mm_dd(to);
+
+    // Кнопка «Обновить»
+    qs('btnDailyRefresh').addEventListener('click', loadDailyData);
+
+    // Автообновление при изменении фильтров
+    const debounced = (fn,ms=250)=>{ let t; return (...a)=>{clearTimeout(t); t=setTimeout(()=>fn(...a),ms);} };
+    const rerender = debounced(renderDaily);
+    ['dailyFrom','dailyTo','dailyStore','dailyStaff','dailyItemType'].forEach(id=>{
+      const el = qs(id); if (el) el.addEventListener('change', rerender);
+    });
+  }
+
+  // Загрузка (с быстрым кэшем на сервере + локальный localStorage для мгновенного первого экрана)
+  function loadDailyData(){
+    const $item = qs('dailyItemType');
+    // мгновенный рендер из localStorage, если есть
+    let storedCache = null;
+    try {
+      const raw = localStorage.getItem('DAILY_BOOT_CACHE');
+      if (raw) storedCache = JSON.parse(raw);
+    } catch(_) {
+      storedCache = null;
+    }
+    DAILY.cacheToken = storedCache && storedCache._cacheToken ? storedCache._cacheToken : null;
+    const hadStoredCache = !!storedCache;
+    if (storedCache && !DAILY.data) {
+      DAILY.data = storedCache;
+      // заполнить item_types
+      refillItemTypes();
+      renderDaily();
+    }
+
+    // затем — свежие данные с сервера
+    const btn = qs('btnDailyRefresh'); if (btn) btn.disabled = true;
+    google.script.run
+      .withSuccessHandler(data=>{
+        DAILY.data = data || null;
+        btn && (btn.disabled = false);
+        const serverToken = DAILY.data && DAILY.data._cacheToken;
+        const localToken = DAILY.cacheToken;
+        try {
+          if (!serverToken) {
+            localStorage.removeItem('DAILY_BOOT_CACHE');
+          } else {
+            if ((localToken && localToken !== serverToken) || (!localToken && hadStoredCache)) {
+              localStorage.removeItem('DAILY_BOOT_CACHE');
+            }
+            localStorage.setItem('DAILY_BOOT_CACHE', JSON.stringify(DAILY.data||{}));
+          }
+        } catch(_){}
+        DAILY.cacheToken = serverToken || null;
+        refillItemTypes();
+        renderDaily();
+      })
+      .withFailureHandler(err=>{
+        btn && (btn.disabled = false);
+        alert('Ошибка загрузки отчёта: ' + (err && err.message ? err.message : err));
+      })
+      .getDailyReportBootstrap();
+  }
+
+  function refillItemTypes(){
+    const it = (DAILY.data?.dicts?.item_types) || [];
+    const $item = qs('dailyItemType');
+    if (!$item) return;
+    const prev = $item.value;
+    $item.innerHTML=''; $item.append(option('Все типы',''));
+    (it||[]).forEach(x => $item.append(option(x.name || x, x.name || x)));
+    // вернуть выбранное, если есть
+    $item.value = (prev && [...$item.options].some(o=>o.value===prev)) ? prev : '';
+  }
+
+  // Основной рендер
+  function renderDaily(){
+    const data = DAILY.data;
+    const $days = qs('dailyDays');
+    if (!$days) return;
+
+    if (!data || !(data.days||[]).length){
+      $days.innerHTML = '<p class="muted">Нет данных для отображения.</p>';
+      return;
+    }
+
+    // Фильтры
+    const f = {
+      from: qs('dailyFrom').value,
+      to:   qs('dailyTo').value,
+      store: qs('dailyStore').value,
+      staff: qs('dailyStaff').value,
+      item:  qs('dailyItemType').value
+    };
+
+    // Фильтруем дни по диапазону (внутри дня — строки по store/staff/item)
+    const daysInRange = (data.days||[]).filter(d => withinDateRange(d.date, f.from, f.to));
+
+    // === Блоки по дням ===
+    const frag = document.createDocumentFragment();
+
+    daysInRange.forEach(d => {
+      const chip = parseSelectedChip(d.date);
+      // отфильтрованные строки для дня
+      const daySales = (d.sales||[]).filter(r =>
+        (!f.store || r.store===f.store) &&
+        (!f.staff || r.staff===f.staff) &&
+        (!f.item  || r.item_type===f.item) &&
+        matchesChip(r, chip)
+      );
+      const dayPre = (d.preorders||[]).filter(r =>
+        (!f.store || r.store===f.store) &&
+        (!f.staff || r.staff===f.staff) &&
+        matchesChip(r, chip)
+      );
+
+      // подсчёты по дню
+      const sSales = daySales.reduce((s,r)=> s + Number(r.total||0), 0);
+      const sPre   = dayPre.reduce((s,r)=> s + Number(r._paid_row||0), 0);
+      const payMap = sumPaymentsMapFromRows(daySales); DR_sumInto(payMap, sumPaymentsMapFromRows(dayPre));
+      const payInline = mapToPairsSorted(payMap).map(([m,v]) => `${escapeHtml(m)}: <span class="money">${money(v)}</span>`).join(' · ');
+
+      const card = document.createElement('section');
+      card.style.margin = '0 0 14px 0';
+      card.style.border = '1px solid var(--border)';
+      card.style.background = 'var(--surface)';
+      card.style.borderRadius = '12px';
+      card.style.boxShadow = 'var(--shadow)';
+      card.innerHTML = `
+        <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <div style="font-weight:700;">${escapeHtml(d.date)}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            ${(d.staffStores||[]).map(({store,staff,staff_color})=>{
+              const active = chip && chip.store===store && chip.staff===staff;
+              return `
+                <button class="btn btn-small" data-chip
+                        data-date="${escapeHtml(d.date)}"
+                        data-store="${escapeHtml(store)}"
+                        data-staff="${escapeHtml(staff)}"
+                        aria-pressed="${active?'true':'false'}"
+                        style="display:flex;align-items:center;gap:6px;${active?'border-color:var(--accent);':''}">
+                  <span class="dot" style="background:${escapeHtml(staff_color||'#cbd5e1')};"></span>
+                  ${escapeHtml(staff)} — ${escapeHtml(store)}
+                </button>
+              `;
+            }).join('')}
+            ${(d.staffStores||[]).length ? `
+              <button class="btn btn-small" data-chip-clear data-date="${escapeHtml(d.date)}">Показать всех</button>
+            ` : ''}
+          </div>
+          <div style="margin-left:auto" class="muted">Оплаты: ${payInline || '—'}</div>
+        </div>
+
+        <div style="padding:10px 12px;">
+          <!-- Продажи -->
+          <div style="font-weight:600;margin:6px 0;">Продажи</div>
+          <table class="table" aria-label="Продажи за день">
+            <thead>
+              <tr>
+                <th>ID</th><th>Дата</th><th>Магазин</th><th>Сотрудник</th><th>Тип</th><th>Сост.</th>
+                <th>Модель</th><th>Память</th><th>Цвет</th><th>IMEI/SKU</th>
+                <th class="money">Итого ₽</th><th>Оплаты</th><th>Сдача</th><th>Клиент</th><th>Телефон</th><th class="money">ЗП ₽</th><th>Прим.</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${daySales.map(r => `
+                <tr>
+                  <td>${escapeHtml(r.id)}</td>
+                  <td>${escapeHtml(r.date)}</td>
+                  <td>${escapeHtml(r.store)}</td>
+                  <td>${escapeHtml(r.staff)}</td>
+                  <td>${escapeHtml(r.item_type)}</td>
+                  <td>${escapeHtml(r.condition)}</td>
+                  <td>${escapeHtml(r.model_name)}</td>
+                  <td>${escapeHtml(r.memory)}</td>
+                  <td>${escapeHtml(r.color)}</td>
+                  <td>${escapeHtml(r.imei_or_sku)}</td>
+                  <td class="money">${formatPrice(r.total)}</td>
+                  <td>${escapeHtml(r.payments)}</td>
+                  <td>${escapeHtml(r.sdacha)}</td>
+                  <td>${escapeHtml(r.customer)}</td>
+                  <td>${escapeHtml(r.phone)}</td>
+                  <td class="money">${formatPrice(r.zarplata)}</td>
+                  <td>${escapeHtml(r.note)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+
+          <!-- Предзаказы -->
+          <div style="font-weight:600;margin:16px 0 6px;">Предзаказы</div>
+          <table class="table" aria-label="Предзаказы за день">
+            <thead>
+              <tr>
+                <th>ID</th><th>Дата</th><th>Магазин</th><th>Сотрудник</th><th>Статус</th>
+                <th>Модель</th><th>Память</th><th>Цвет</th><th>IMEI</th>
+                <th class="money">Цена ₽</th><th class="money">Внесено ₽</th><th>Оплаты</th><th>Клиент</th><th>Телефон</th><th class="money">ЗП ₽</th><th>Прим.</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${dayPre.map(r => `
+                <tr>
+                  <td>${escapeHtml(r.id)}</td>
+                  <td>${escapeHtml(r.date)}</td>
+                  <td>${escapeHtml(r.store)}</td>
+                  <td>${escapeHtml(r.staff)}</td>
+                  <td>${escapeHtml(r.preorder_statuses)}</td>
+                  <td>${escapeHtml(r.model_name)}</td>
+                  <td>${escapeHtml(r.memory)}</td>
+                  <td>${escapeHtml(r.color)}</td>
+                  <td>${escapeHtml(r.pre_imei)}</td>
+                  <td class="money">${formatPrice(r.pre_price)}</td>
+                  <td class="money">${formatPrice(r._paid_row)}</td>
+                  <td>${escapeHtml(r.payments)}</td>
+                  <td>${escapeHtml(r.customer)}</td>
+                  <td>${escapeHtml(r.phone)}</td>
+                  <td class="money">${formatPrice(r.zarplata)}</td>
+                  <td>${escapeHtml(r.note)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+
+          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;">
+            <div class="btn btn-small" style="cursor:default">Итого продажи: <span class="money">${money(sSales)}</span></div>
+            <div class="btn btn-small" style="cursor:default">Внесено по предзаказам: <span class="money">${money(sPre)}</span></div>
+            <div class="btn btn-small" style="cursor:default">День всего: <span class="money">${money(sSales + sPre)}</span></div>
+          </div>
+        </div>
+      `;
+
+      // клики по чипсам
+      card.addEventListener('click', (e)=>{
+        const btn = e.target.closest('button[data-chip]');
+        const clr = e.target.closest('button[data-chip-clear]');
+        if (btn){
+          const date = btn.getAttribute('data-date');
+          const store= btn.getAttribute('data-store');
+          const staff= btn.getAttribute('data-staff');
+          const active = btn.getAttribute('aria-pressed') === 'true';
+          if (active){ DAILY.selectedChip[date] = null; }
+          else { DAILY.selectedChip[date] = { store, staff }; }
+          renderDaily(); // перерисуем только всё (простота)
+        } else if (clr){
+          const date = clr.getAttribute('data-date');
+          DAILY.selectedChip[date] = null;
+          renderDaily();
+        }
+      });
+
+      frag.appendChild(card);
+    });
+
+    $days.innerHTML = '';
+    $days.appendChild(frag);
+  }
+
+  function DR_sumInto(dst, src){
+    Object.keys(src||{}).forEach(k => { dst[k] = (dst[k] || 0) + (src[k] || 0); });
+  }
+
+  // Инициализация при первом показе вкладки (без правок в Index.html)
+  function initWhenTabActivates(){
+    if (DAILY.inited) return;
+    const panel = document.getElementById('tab-daily');
+    if (!panel) return;
+
+    const onMaybeActive = () => {
+      if (panel.classList.contains('active') && !DAILY.inited) {
+        DAILY.inited = true;
+        mountSkeleton();
+        loadDailyData();
+      }
+    };
+
+    // если вкладка уже активна
+    onMaybeActive();
+
+    // наблюдаем за изменениями класса
+    const mo = new MutationObserver(onMaybeActive);
+    mo.observe(panel, { attributes:true, attributeFilter:['class'] });
+
+    // на случай смены хэша
+    addEventListener('hashchange', onMaybeActive);
+  }
+
+  // Старт
+  initWhenTabActivates();
+})();
+</script>

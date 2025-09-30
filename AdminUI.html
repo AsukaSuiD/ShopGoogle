@@ -1,0 +1,617 @@
+<!-- AdminUX.html -->
+<section class="admin-wrap" aria-label="Админ-панель">
+  <!-- ===== PIN GATE ===== -->
+  <div id="adminGate" class="admin-gate">
+    <h2 style="margin:0 0 8px 0;">Админ</h2>
+    <div id="adminGateBody">
+      <p class="muted" id="adminGateHint" style="margin:0 0 10px 0;">Для доступа в раздел введите PIN.</p>
+      <div class="pin-row">
+        <input id="adminPin" type="password" inputmode="numeric" autocomplete="one-time-code" placeholder="PIN" maxlength="10">
+        <button id="btnAdminLogin" class="btn btn-primary">Войти</button>
+      </div>
+      <div id="adminGateError" class="muted" style="color:#dc2626;margin-top:6px;display:none;"></div>
+    </div>
+  </div>
+
+  <!-- ===== МЕНЮ ===== -->
+  <div id="adminApp" style="display:none;">
+    <h2 style="margin:0 0 12px 0;">Админ</h2>
+
+    <div class="admin-menu" role="list">
+      <button class="admin-card" role="listitem" data-go="stock-add">
+        <div class="admin-card-title">Склад: добавить</div>
+        <div class="admin-card-desc">Один или список IMEI</div>
+      </button>
+
+      <button class="admin-card" role="listitem" data-go="stock-edit">
+        <div class="admin-card-title">Склад: редактировать</div>
+        <div class="admin-card-desc">Поиск по IMEI / правка</div>
+      </button>
+
+      <button class="admin-card" role="listitem" data-go="settings">
+        <div class="admin-card-title">Настройки</div>
+        <div class="admin-card-desc">PIN и доступ (инфо)</div>
+      </button>
+    </div>
+
+    <!-- Контент разделов -->
+    <div id="adminContent" class="admin-content"></div>
+  </div>
+</section>
+
+<style>
+  .admin-wrap .muted { color: var(--muted); }
+  .admin-gate{
+    border:1px solid var(--border); background:var(--surface);
+    border-radius:16px; padding:14px; box-shadow:var(--shadow); margin-bottom:14px;
+  }
+  .pin-row{ display:flex; gap:8px; align-items:center; }
+  .pin-row input{
+    background:var(--surface); color:var(--text); border:1px solid var(--border);
+    border-radius:10px; padding:8px 10px; font-size:16px; width:180px;
+  }
+
+  .admin-menu{
+    display:grid; grid-template-columns: repeat(3, minmax(220px, 1fr));
+    gap:12px; margin-bottom:14px;
+  }
+  @media (max-width: 900px){ .admin-menu{ grid-template-columns: repeat(2, minmax(180px, 1fr)); } }
+  @media (max-width: 600px){ .admin-menu{ grid-template-columns: 1fr; } }
+
+  .admin-card{
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 14px;
+    padding: 14px 12px; text-align: left; cursor: pointer; box-shadow: var(--shadow);
+    transition: border-color .15s, transform .06s;
+  }
+  .admin-card:hover{ border-color: var(--accent); }
+  .admin-card:active{ transform: translateY(1px); }
+  .admin-card-title{ font-weight: 700; margin-bottom: 4px; }
+  .admin-card-desc{ font-size: 13px; color: var(--muted); }
+
+  .admin-content{
+    border:1px solid var(--border); background:var(--surface);
+    border-radius:16px; padding:14px; display:none;
+  }
+
+  .admin-head{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px; }
+  .grid-2{ display:grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap:10px; }
+  @media (max-width: 700px){ .grid-2{ grid-template-columns: 1fr; } }
+  .field{ display:flex; flex-direction:column; gap:6px; }
+  .field label{ font-size:12px; color:var(--muted); }
+  .field input, .field select, .field textarea{
+    background:var(--surface); color:var(--text); border:1px solid var(--border);
+    border-radius:10px; padding:8px 10px; font-size:14px;
+  }
+  .table{ width:100%; border-collapse: collapse; border:1px solid var(--border); background:var(--surface); border-radius:12px; overflow:hidden; }
+  .table th, .table td{ padding:8px 10px; border-bottom:1px solid var(--border); font-size:14px; text-align:left; }
+  .hint{ font-size:12px; color:var(--muted); }
+</style>
+
+<script>
+  (function AdminInit(){
+    const $gate = document.getElementById('adminGate');
+    const $app  = document.getElementById('adminApp');
+    const $content = document.getElementById('adminContent');
+    const $btnLogin = document.getElementById('btnAdminLogin');
+    const $pin = document.getElementById('adminPin');
+    const $err = document.getElementById('adminGateError');
+    const TOKEN_KEY = 'ADMIN_TOKEN_V1';
+
+    function token(){ return localStorage.getItem(TOKEN_KEY) || ''; }
+    function setToken(t){ if (t) localStorage.setItem(TOKEN_KEY, t); }
+    function clearToken(){ localStorage.removeItem(TOKEN_KEY); }
+
+    function gateMessage(txt){ const hint = document.getElementById('adminGateHint'); if (hint) hint.textContent = txt; }
+
+    function showApp(){
+      $gate.style.display = 'none';
+      $app.style.display = 'block';
+      $content.style.display = 'none';
+      $content.innerHTML = '';
+    }
+    function showGate(){
+      $app.style.display = 'none';
+      $gate.style.display = 'block';
+    }
+
+    function checkState(){
+      google.script.run
+        .withSuccessHandler(state=>{
+          if (!state?.isPinSet){
+            gateMessage('PIN не настроен. Администратор должен один раз вызвать adminSetPin("1234") в IDE Apps Script.');
+          }
+          if (state?.authed){ showApp(); } else { showGate(); }
+        })
+        .withFailureHandler(()=> showGate())
+        .adminGetAuthState(token());
+    }
+
+    $btnLogin.addEventListener('click', ()=>{
+      $err.style.display = 'none';
+      const p = $pin.value.trim();
+      if (!p){ $err.textContent='Введите PIN'; $err.style.display='block'; return; }
+      google.script.run
+        .withSuccessHandler(res=>{
+          if (res?.ok){ setToken(res.token); showApp(); }
+        })
+        .withFailureHandler(e=>{
+          $err.textContent = (e && e.message) ? e.message : 'Ошибка входа';
+          $err.style.display = 'block';
+        })
+        .adminLogin(p);
+    });
+
+    /* ====== Меню ====== */
+    document.querySelectorAll('.admin-card').forEach(btn=>{
+      btn.addEventListener('click', ()=> openSection(btn.getAttribute('data-go')));
+    });
+
+    function openSection(key){
+      $content.style.display = 'block';
+      if (key === 'stock-add') renderStockAdd();
+      else if (key === 'stock-edit') renderStockEdit();
+      else if (key === 'settings') renderSettings();
+      else {
+        $content.innerHTML = `<div class="admin-head"><h3 style="margin:0;">Раздел</h3>
+          <button class="btn" id="admBack">Назад</button></div>
+          <div class="muted">Страница в разработке.</div>`;
+        $content.querySelector('#admBack').addEventListener('click', ()=>{ $content.style.display='none'; $content.innerHTML=''; });
+      }
+    }
+
+    function option(label,value){ const o=document.createElement('option'); o.textContent=label; o.value=value??''; return o; }
+    function fillDict(select, dict, placeholder){ select.innerHTML=''; select.append(option(placeholder,'')); (dict||[]).forEach(d=> select.append(option(d.name, d.code||d.name))); }
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+
+    /* ====== STOCK: ADD (один/несколько) ====== */
+    function renderStockAdd(){
+      $content.innerHTML = `
+        <div class="admin-head">
+          <h3 style="margin:0;">Склад: добавить позицию</h3>
+          <div style="display:flex;gap:8px;">
+            <button class="btn" id="admBack">Назад</button>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:8px; margin-bottom:10px;">
+          <button class="btn btn-primary" id="modeSingle">Один</button>
+          <button class="btn" id="modeBulk">Несколько</button>
+        </div>
+
+        <div class="grid-2">
+          <div class="field"><label>Город</label><select id="stCity"></select></div>
+          <div class="field"><label>Состояние</label><select id="stCond"></select></div>
+
+          <div class="field"><label>Модель</label><select id="stModel"></select></div>
+          <div class="field"><label>Память</label><select id="stMem"></select></div>
+
+          <div class="field"><label>Цвет</label><select id="stColor"></select></div>
+
+          <!-- SINGLE -->
+          <div class="field single-only"><label>IMEI</label><input id="stImei" type="text" placeholder="Обязателен"></div>
+
+          <!-- BULK -->
+          <div class="field bulk-only" style="display:none; grid-column:1/-1;">
+            <label>Список IMEI (по одному на строке)</label>
+            <textarea id="stImeiBatch" rows="6" placeholder="356...&#10;356...&#10;..."></textarea>
+            <span class="hint">Дубликаты и пустые строки будут пропущены.</span>
+          </div>
+
+          <div class="field">
+            <label>Цена продажи (₽)</label>
+            <input id="stPrice" type="number" step="0.01">
+            <span class="hint" id="priceHint"></span>
+          </div>
+
+          <div class="field"><label>Статус</label><select id="stStatus"></select></div>
+
+          <div class="field" style="grid-column:1/-1"><label>Примечание</label><textarea id="stNote"></textarea></div>
+        </div>
+
+        <div style="margin-top:12px; display:flex; gap:8px; align-items:center;">
+          <button id="btnAddStock" class="btn btn-primary single-only">Добавить</button>
+          <button id="btnAddAnother" class="btn single-only" style="display:none;">Добавить ещё</button>
+
+          <button id="btnAddBulk" class="btn btn-primary bulk-only" style="display:none;">Добавить список</button>
+
+          <span class="muted" id="stMsg"></span>
+        </div>
+
+        <div id="bulkReport" class="hint" style="margin-top:8px; display:none;"></div>
+      `;
+
+      document.getElementById('admBack').addEventListener('click', ()=>{ $content.style.display='none'; $content.innerHTML=''; });
+
+      const $city  = document.getElementById('stCity');
+      const $cond  = document.getElementById('stCond');
+      const $status= document.getElementById('stStatus');
+      const $model = document.getElementById('stModel');
+      const $mem   = document.getElementById('stMem');
+      const $color = document.getElementById('stColor');
+      const $price = document.getElementById('stPrice');
+      const $priceHint = document.getElementById('priceHint');
+
+      const $btnAdd = document.getElementById('btnAddStock');
+      const $btnAddAnother = document.getElementById('btnAddAnother');
+      const $btnAddBulk = document.getElementById('btnAddBulk');
+
+      // режимы
+      const $modeSingle = document.getElementById('modeSingle');
+      const $modeBulk   = document.getElementById('modeBulk');
+      function setMode(bulk){
+        document.querySelectorAll('.single-only').forEach(el=> el.style.display = bulk ? 'none':'');
+        document.querySelectorAll('.bulk-only').forEach(el=> el.style.display   = bulk ? '' : 'none');
+        $modeSingle.className = 'btn' + (bulk ? '' : ' btn-primary');
+        $modeBulk.className   = 'btn' + (bulk ? ' btn-primary' : '');
+        $btnAdd.style.display = bulk ? 'none' : '';
+        $btnAddAnother.style.display = bulk ? 'none' : 'none';
+        $btnAddBulk.style.display = bulk ? '' : 'none';
+      }
+      $modeSingle.addEventListener('click', ()=> setMode(false));
+      $modeBulk.addEventListener('click', ()=> setMode(true));
+      setMode(false);
+
+      // словари из "Справочники"
+      google.script.run
+        .withSuccessHandler(dict=>{
+          fillDict($city,  dict.cities, 'Выбери город');
+          fillDict($cond,  dict.conditions, 'Выбери состояние');
+
+          $status.innerHTML = '';
+          const list = (dict.stock_statuses || []).map(d=>d.name).filter(Boolean);
+          const base = ['В наличии','Зарезервирован','Продан'];
+          const uniq = (arr)=> Array.from(new Set(arr));
+          uniq([...(list.length ? list : []), ...base]).forEach(s=>{
+            $status.append(option(s, s));
+          });
+          const def = Array.from($status.options).find(o=>o.value==='В наличии');
+          if (def) $status.value = 'В наличии';
+        })
+        .withFailureHandler(()=>{
+          fillDict($city,  [], 'Выбери город');
+          fillDict($cond,  [], 'Выбери состояние');
+          ['В наличии','Зарезервирован','Продан'].forEach(s=> $status.append(option(s,s)));
+          $status.value = 'В наличии';
+        })
+        .adminGetCoreDicts(token());
+
+      // Каскад + автоцена
+      let CAT = [];
+      const fillSimple = (el, arr, ph)=>{ el.innerHTML=''; el.append(option(ph,'')); arr.forEach(v=> el.append(option(v,v))); };
+
+      const setModels = () => {
+        const models = Array.from(new Set(CAT.map(r=>r.model_name).filter(Boolean)))
+          .sort((a,b)=> String(a).localeCompare(String(b),'ru',{numeric:true,sensitivity:'base'}));
+        fillSimple($model, models, 'Выбери модель');
+        fillSimple($mem, [], 'Память');
+        fillSimple($color, [], 'Цвет');
+        $price.value=''; $priceHint.textContent='';
+      };
+      const onModelChange = () => {
+        const m = $model.value;
+        const memories = Array.from(new Set(CAT.filter(r=>r.model_name===m).map(r=>r.memory).filter(Boolean)))
+          .sort((a,b)=> String(a).localeCompare(String(b),'ru',{numeric:true,sensitivity:'base'}));
+        fillSimple($mem, memories, 'Память');
+        fillSimple($color, [], 'Цвет');
+        $price.value=''; $priceHint.textContent='';
+      };
+      const onMemChange = () => {
+        const m = $model.value, mem=$mem.value;
+        const colors = Array.from(new Set(CAT.filter(r=>r.model_name===m && r.memory===mem).map(r=>r.color).filter(Boolean)))
+          .sort((a,b)=> String(a).localeCompare(String(b),'ru',{numeric:true,sensitivity:'base'}));
+        fillSimple($color, colors, 'Цвет');
+        $price.value=''; $priceHint.textContent='';
+      };
+      const onColorChange = () => {
+        const m=$model.value, mem=$mem.value, c=$color.value;
+        if (m && mem && c){
+          const row = CAT.find(r=> r.model_name===m && r.memory===mem && r.color===c);
+          if (row && row.sale_price!=null && row.sale_price!==''){
+            $price.value = String(row.sale_price).toString().replace(',','.');
+            $priceHint.textContent = 'Цена из каталога';
+          } else { $priceHint.textContent = ''; }
+        } else { $priceHint.textContent = ''; }
+      };
+      $model.addEventListener('change', onModelChange);
+      $mem.addEventListener('change', onMemChange);
+      $color.addEventListener('change', onColorChange);
+
+      google.script.run
+        .withSuccessHandler(res=>{ CAT=(res?.rows)||[]; setModels(); })
+        .withFailureHandler(()=> setModels())
+        .adminGetCatalog(token());
+
+      // SINGLE сохранение
+      const $msg = document.getElementById('stMsg');
+      function buildDocCommon(){
+        return {
+          city: $city.value,
+          condition: $cond.value,
+          model_name: $model.value,
+          memory: $mem.value,
+          color: $color.value,
+          sale_price: $price.value,
+          stock_statuses: document.getElementById('stStatus').value,
+          note: document.getElementById('stNote').value
+        };
+      }
+      function validateCommon(doc){
+        if (!doc.city) return 'Выберите город';
+        if (!doc.condition) return 'Выберите состояние';
+        if (!doc.model_name) return 'Выберите модель';
+        if (!doc.memory) return 'Выберите память';
+        if (!doc.color) return 'Выберите цвет';
+        return '';
+      }
+      function resetForNext(){
+        const i = document.getElementById('stImei');
+        if (i) i.value = '';
+        document.getElementById('stNote').value = '';
+        if (i) i.focus();
+      }
+
+      $btnAdd.addEventListener('click', ()=>{
+        $msg.textContent = '';
+        const base = buildDocCommon();
+        const err = validateCommon(base);
+        if (err){ $msg.textContent = err; return; }
+        const doc = { ...base, imei: document.getElementById('stImei').value.trim() };
+        if (!doc.imei){ $msg.textContent = 'IMEI обязателен'; return; }
+
+        google.script.run
+          .withSuccessHandler(res=>{
+            if(res?.ok){
+              $msg.textContent = 'Добавлено: IMEI ' + res.imei + (res.id ? (' • ID ' + res.id) : '');
+              $btnAddAnother.style.display = 'inline-flex';
+              resetForNext();
+            } else { $msg.textContent = 'Не удалось добавить'; }
+          })
+          .withFailureHandler(e=>{ $msg.textContent = (e && e.message) ? e.message : 'Ошибка сохранения'; })
+          .adminStockAdd(token(), doc);
+      });
+
+      $btnAddAnother.addEventListener('click', ()=> $btnAdd.click());
+
+      // BULK сохранение
+      const $bulkReport = document.getElementById('bulkReport');
+      $btnAddBulk.addEventListener('click', ()=>{
+        $msg.textContent = '';
+        $bulkReport.style.display = 'none';
+        $bulkReport.textContent = '';
+
+        const base = buildDocCommon();
+        const err = validateCommon(base);
+        if (err){ $msg.textContent = err; return; }
+
+        const lines = (document.getElementById('stImeiBatch').value || '')
+          .split(/\r?\n/)
+          .map(s=> s.trim())
+          .filter(Boolean);
+
+        if (!lines.length){ $msg.textContent = 'Вставьте IMEI по одному на строке'; return; }
+
+        const docs = lines.map(im => ({ ...base, imei: im }));
+
+        google.script.run
+          .withSuccessHandler(res=>{
+            const parts = [];
+            parts.push(`Запрошено: ${res.total_requested}`);
+            parts.push(`Добавлено: ${res.total_added}`);
+            if (res.skipped_duplicates?.length) parts.push(`Пропущены (дубли): ${res.skipped_duplicates.length}`);
+            if (res.invalid?.length) parts.push(`Ошибки: ${res.invalid.length}`);
+
+            $bulkReport.innerHTML = parts.join(' • ');
+
+            if (res.invalid?.length || res.skipped_duplicates?.length){
+              const bad = []
+                .concat((res.invalid||[]).map(x=> `❌ ${x.imei || '(пусто)'} — ${esc(x.error)}`))
+                .concat((res.skipped_duplicates||[]).map(x=> `↩️ дубль: ${x}`));
+              $bulkReport.innerHTML += '<br>' + bad.slice(0,50).join('<br>');
+              if (bad.length > 50) $bulkReport.innerHTML += '<br>…';
+            }
+            $bulkReport.style.display = 'block';
+            $msg.textContent = 'Готово';
+          })
+          .withFailureHandler(e=>{
+            $msg.textContent = (e && e.message) ? e.message : 'Ошибка сохранения';
+          })
+          .adminStockAddMany(token(), docs);
+      });
+    }
+
+    /* ====== STOCK: EDIT ====== */
+    function renderStockEdit(){
+      $content.innerHTML = `
+        <div class="admin-head">
+          <h3 style="margin:0;">Склад: редактировать</h3>
+          <button class="btn" id="admBack">Назад</button>
+        </div>
+
+        <div class="grid-2" style="margin-bottom:10px;">
+          <div class="field"><label>IMEI (часть)</label><input id="seImei" type="text" placeholder="Например: 356..."></div>
+          <div class="field"><label>Модель</label><input id="seModel" type="text" placeholder="(необязательно)"></div>
+          <div class="field"><label>Город</label><select id="seCity"></select></div>
+          <div class="field"><label>Состояние</label><select id="seCond"></select></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;">
+          <button class="btn btn-primary" id="btnSearch">Искать</button>
+          <span class="muted" id="seMsg"></span>
+        </div>
+
+        <table class="table" id="seTable" aria-label="Результаты">
+          <thead>
+            <tr>
+              <th>Город</th><th>Сост.</th><th>Модель</th><th>Память</th><th>Цвет</th><th>IMEI</th>
+              <th>Цена ₽</th><th>Статус</th><th>Прим.</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+
+        <div id="editBox" style="display:none;margin-top:12px;">
+          <div class="admin-head">
+            <h3 style="margin:0;">Правка позиции</h3>
+            <button class="btn" id="btnEditClose">Закрыть</button>
+          </div>
+          <div class="grid-2">
+            <div class="field"><label>Город</label><select id="edCity"></select></div>
+            <div class="field"><label>Состояние</label><select id="edCond"></select></div>
+            <div class="field"><label>Модель</label><input id="edModel" type="text"></div>
+            <div class="field"><label>Память</label><input id="edMem" type="text"></div>
+            <div class="field"><label>Цвет</label><input id="edColor" type="text"></div>
+            <div class="field"><label>IMEI</label><input id="edImei" type="text" readonly></div>
+            <div class="field"><label>Цена продажи (₽)</label><input id="edPrice" type="number" step="0.01"></div>
+            <div class="field"><label>Статус</label>
+              <select id="edStatus">
+                <option value="В наличии">В наличии</option>
+                <option value="Зарезервирован">Зарезервирован</option>
+                <option value="Продан">Продан</option>
+              </select>
+            </div>
+            <div class="field" style="grid-column:1/-1;"><label>Примечание</label><textarea id="edNote"></textarea></div>
+          </div>
+          <div style="margin-top:12px;display:flex;gap:8px;">
+            <button class="btn btn-primary" id="btnSaveEdit">Сохранить</button>
+            <span class="muted" id="edMsg"></span>
+          </div>
+        </div>
+      `;
+
+      document.getElementById('admBack').addEventListener('click', ()=>{ $content.style.display='none'; $content.innerHTML=''; });
+
+      const $seCity = document.getElementById('seCity');
+      const $seCond = document.getElementById('seCond');
+      const $edCity = document.getElementById('edCity');
+      const $edCond = document.getElementById('edCond');
+
+      google.script.run
+        .withSuccessHandler(dict=>{
+          fillDict($seCity, dict.cities, 'Все города');
+          fillDict($seCond, dict.conditions, 'Все состояния');
+          fillDict($edCity, dict.cities, '—');
+          fillDict($edCond, dict.conditions, '—');
+        })
+        .withFailureHandler(()=>{
+          fillDict($seCity, [], 'Все города');
+          fillDict($seCond, [], 'Все состояния');
+          fillDict($edCity, [], '—');
+          fillDict($edCond, [], '—');
+        })
+        .adminGetCoreDicts(token());
+
+      const $tbody = document.querySelector('#seTable tbody');
+      const $msg = document.getElementById('seMsg');
+
+      document.getElementById('btnSearch').addEventListener('click', ()=>{
+        $tbody.innerHTML = '';
+        $msg.textContent = 'Поиск...';
+        const filters = {
+          imeiQuery: document.getElementById('seImei').value.trim(),
+          model_name: document.getElementById('seModel').value.trim(),
+          city: $seCity.value,
+          condition: $seCond.value
+        };
+        google.script.run
+          .withSuccessHandler(res=>{
+            $msg.textContent = '';
+            const rows = res?.rows || [];
+            if (!rows.length){ $msg.textContent = 'Ничего не найдено'; return; }
+            rows.forEach(r=>{
+              const tr=document.createElement('tr');
+              tr.innerHTML = `
+                <td>${esc(r.city)}</td>
+                <td>${esc(r.condition)}</td>
+                <td>${esc(r.model_name)}</td>
+                <td>${esc(r.memory)}</td>
+                <td>${esc(r.color)}</td>
+                <td>${esc(r.imei)}</td>
+                <td>${esc(r.sale_price ?? '')}</td>
+                <td>${esc(r.stock_statuses)}</td>
+                <td>${esc(r.note)}</td>
+                <td><button class="btn btn-small">Править</button></td>
+              `;
+              tr.querySelector('button').addEventListener('click', ()=> openEdit(r));
+              $tbody.appendChild(tr);
+            });
+          })
+          .withFailureHandler(e=>{ $msg.textContent = (e && e.message) ? e.message : 'Ошибка поиска'; })
+          .adminStockSearch(token(), filters);
+      });
+
+      function openEdit(r){
+        document.getElementById('editBox').style.display = 'block';
+        document.getElementById('edCity').value = r.city || '';
+        document.getElementById('edCond').value = r.condition || '';
+        document.getElementById('edModel').value = r.model_name || '';
+        document.getElementById('edMem').value = r.memory || '';
+        document.getElementById('edColor').value = r.color || '';
+        document.getElementById('edImei').value = r.imei || '';
+        document.getElementById('edPrice').value = (r.sale_price ?? '').toString().replace(',','.');
+        document.getElementById('edStatus').value = r.stock_statuses || 'В наличии';
+        document.getElementById('edNote').value = r.note || '';
+
+        document.getElementById('btnEditClose').onclick = ()=> {
+          document.getElementById('editBox').style.display = 'none';
+        };
+
+        const $edMsg = document.getElementById('edMsg');
+        document.getElementById('btnSaveEdit').onclick = ()=>{
+          $edMsg.textContent = '';
+          const doc = {
+            imei: document.getElementById('edImei').value.trim(),
+            city: document.getElementById('edCity').value,
+            condition: document.getElementById('edCond').value,
+            model_name: document.getElementById('edModel').value,
+            memory: document.getElementById('edMem').value,
+            color: document.getElementById('edColor').value,
+            sale_price: document.getElementById('edPrice').value,
+            stock_statuses: document.getElementById('edStatus').value,
+            note: document.getElementById('edNote').value
+          };
+          google.script.run
+            .withSuccessHandler(res=>{
+              if(res?.ok){
+                $edMsg.textContent = 'Сохранено';
+              } else {
+                $edMsg.textContent = 'Не удалось сохранить';
+              }
+            })
+            .withFailureHandler(e=>{ $edMsg.textContent = (e && e.message) ? e.message : 'Ошибка'; })
+            .adminStockUpdate(token(), doc);
+        };
+      }
+    }
+
+    /* ===== SETTINGS (инфо) ===== */
+    function renderSettings(){
+      $content.innerHTML = `
+        <div class="admin-head">
+          <h3 style="margin:0;">Настройки</h3>
+          <button class="btn" id="admBack">Назад</button>
+        </div>
+        <div class="muted" style="margin-bottom:8px;">
+          Для задания/смены PIN администратор запускает функцию <code>adminSetPin('1234')</code> в IDE Apps Script (Раздел «Сервисные функции»).
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn" id="btnLogout">Выйти из Админ</button>
+          <span class="muted" id="setMsg"></span>
+        </div>
+      `;
+      document.getElementById('admBack').addEventListener('click', ()=>{ $content.style.display='none'; $content.innerHTML=''; });
+      const $m = document.getElementById('setMsg');
+      document.getElementById('btnLogout').addEventListener('click', ()=>{
+        google.script.run
+          .withSuccessHandler(()=>{ localStorage.removeItem('ADMIN_TOKEN_V1'); $m.textContent='Вышли. Обновите вкладку «Админ».'; })
+          .withFailureHandler(()=>{ localStorage.removeItem('ADMIN_TOKEN_V1'); $m.textContent='Вышли.'; })
+          .adminLogout(token());
+      });
+    }
+
+    // первый запуск
+    google.script.run
+      .withSuccessHandler(()=> checkState())
+      .withFailureHandler(()=> checkState())
+      .adminGetBootstrap(localStorage.getItem(TOKEN_KEY) || '');
+  })();
+</script>
